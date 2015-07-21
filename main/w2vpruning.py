@@ -11,7 +11,6 @@ from six import iteritems, itervalues, string_types
 import logging
 import gzip
 from os.path import join
-from general.config import DataEnum, DataType, Config
 import codecs
 
 def getEmbeddingsAndVocab(w2vModelFilename, rebuild=False):
@@ -58,6 +57,7 @@ class LineSentence(object):
         """Iterate through the lines in the source."""
         for line in self.source:
             yield line.split()#self.any2utf8(line).split()
+
 
 class WordAccuracy(object):
 
@@ -218,15 +218,15 @@ if __name__ == "__main__":
 
     import logging
     import sys
-    logger = logging.getLogger()
-    logger.setLevel(logging.INFO)
-
-    ch = logging.StreamHandler(sys.stdout)
-    ch.setLevel(logging.INFO)
-    formatter = logging.Formatter('%(asctime)s : %(levelname)s : %(message)s')
-    ch.setFormatter(formatter)
-    logger.handlers = []
-    logger.addHandler(ch)
+    # logger = logging.getLogger()
+    # logger.setLevel(logging.INFO)
+    #
+    # ch = logging.StreamHandler(sys.stdout)
+    # ch.setLevel(logging.INFO)
+    # formatter = logging.Formatter('%(asctime)s : %(levelname)s : %(message)s')
+    # ch.setFormatter(formatter)
+    # logger.handlers = []
+    # logger.addHandler(ch)
 
     def computeAccuracy(model, logger):
 
@@ -263,6 +263,7 @@ if __name__ == "__main__":
                     sections_accs.append([])
                 acc = float(len(results[pruning_step]['relations'][section]['correct']))/(len(results[pruning_step]['relations'][section]['correct'])+len(results[pruning_step]['relations'][section]['incorrect']))
                 sections_accs[section_names.index(section_name)].append(acc)
+
         return pruning_levels, section_names, sections_accs
 
     def plotAccuracies(size, pruning_levels, section_names, sections_accs):
@@ -301,10 +302,25 @@ if __name__ == "__main__":
             fig.savefig("../data/eval/wikipedia/accuracy-%s.pdf" % r, format='pdf')
 
 
-    #logging.basicConfig(format='%(asctime)s : %(levelname)s : %(message)s', level=logging.INFO)
-    #sentences_path = join("../data/corpora/wikipedia/train/train_all_data_1000000000.txt")
+    ### CONFIG
+
+    logging.basicConfig(format='%(asctime)s : %(levelname)s : %(message)s', level=logging.INFO)
+
+    logger = logging.getLogger()
+    logger.setLevel(logging.INFO)
+
+    ch = logging.StreamHandler(sys.stdout)
+    ch.setLevel(logging.INFO)
+    formatter = logging.Formatter('%(asctime)s : %(levelname)s : %(message)s')
+    ch.setFormatter(formatter)
+    logger.handlers = []
+    logger.addHandler(ch)
+
+    sentences_path = join("../data/corpora/wikipedia/train/train_all_data_1000000000.txt")
 
     sizes = [40, 50, 60, 70, 80, 90, 100, 150, 200, 300, 500]
+
+    ### TRAINING + EVAL
 
     # for size in sizes:
     #     sentences = LineSentence(sentences_path)
@@ -322,10 +338,56 @@ if __name__ == "__main__":
     #     result = {'size': size, 'pruning_levels': pruning_levels, 'section_names': section_names, 'sections_accs': sections_accs}
     #     cPickle.dump(result, open("../data/eval/wikipedia/result-%d.pkl" % size, 'wb'))
 
-    results = []
-    for size in sizes:
-        result = cPickle.load(open("../data/eval/wikipedia/result-%d.pkl" % size, 'rb'))
-        results.append(result)
-        plotAccuracies(size, result['pruning_levels'], result['section_names'], result['sections_accs'])
+    ### PLOTTING
 
-    plotAccuraciesPerRelation(results)
+    # results = []
+    # for size in sizes:
+    #     result = cPickle.load(open("../data/eval/wikipedia/result-%d.pkl" % size, 'rb'))
+    #     results.append(result)
+    #     plotAccuracies(size, result['pruning_levels'], result['section_names'], result['sections_accs'])
+    #
+    # plotAccuraciesPerRelation(results)
+
+    ### Retraining
+
+    sentences = LineSentence(sentences_path)
+
+    retrain_sizes = [50, 100, 200, 500]
+    strt_percentage = 0.
+    end_percentage = 1.
+    step_percentage = 0.1
+
+    for size in retrain_sizes:
+        base_model = Word2Vec(sg=1, hs=0, negative=20, min_count=100, size=size, workers=4, window=9)
+        base_model.build_vocab(sentences=sentences)
+        base_model.train(sentences=sentences)
+        base_model.save_word2vec_format("../data/models/wikipedia/model-%d.w2v" % size, fvocab="../data/models/wikipedia/vocab-%d.w2v" % size, binary=True)
+        base_syn = np.copy(base_model.syn0)
+
+        syn0_sorted = sort(abs(base_syn.flatten()))
+        l = len(syn0_sorted)
+        results = []
+        for i in xrange(int(strt_percentage*l), int(end_percentage*l), int(step_percentage*l)):
+
+            percentage = i/float(l)
+            threshold_value = syn0_sorted[i]
+            print "Percentage of zeroed values: %.2f" % (percentage*100.)
+            print "Threshold value: %.3f" % threshold_value
+            print "Number of zeroes: %d" % i
+
+            new_syn = np.copy(base_syn)
+            new_syn[abs(new_syn) < threshold_value] = 0.
+            base_model.syn0 = new_syn
+
+            base_model.train(sentences)
+            base_model.save_word2vec_format("../data/models/wikipedia/model-%d-%.2f-rtr.w2v" % (size, percentage), fvocab="../data/models/wikipedia/vocab-%d-%.2f-rtr.w2v" % (size, percentage), binary=True)
+
+            wa = WordAccuracy(base_model, logger)
+            relations = wa.accuracy("../data/eval/questions-words.txt", restrict_vocab=30000)
+            print relations
+            result = {'percentage': percentage, 'thresholdValue': threshold_value, 'zeroes': i, 'relations': relations}
+            results.append(result)
+
+        pruning_levels, section_names, sections_accs = cleanAccuracy(results)
+        result = {'size': size, 'pruning_levels': pruning_levels, 'section_names': section_names, 'sections_accs': sections_accs}
+        cPickle.dump(result, open("../data/eval/wikipedia/result-%d-rtr.pkl" % size, 'wb'))
